@@ -137,7 +137,7 @@
 </template>
 
 <script setup lang="ts">
-import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch} from 'vue'
+import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch, watchEffect} from 'vue'
 
 import EditorToolbar from './EditorToolbar.vue'
 
@@ -173,7 +173,6 @@ import {Paragraph} from '@tiptap/extension-paragraph'
 import {Strike} from '@tiptap/extension-strike'
 import {Text} from '@tiptap/extension-text'
 import {BubbleMenu, EditorContent, type Extensions, useEditor} from '@tiptap/vue-3'
-import {Node} from '@tiptap/pm/model'
 
 import Commands from './commands'
 import suggestionSetup from './suggestion'
@@ -195,17 +194,7 @@ import {isEditorContentEmpty} from '@/helpers/editorContentEmpty'
 import inputPrompt from '@/helpers/inputPrompt'
 import {setLinkInEditor} from '@/components/input/editor/setLinkInEditor'
 
-const {
-	modelValue,
-	uploadCallback,
-	isEditEnabled,
-	bottomActions,
-	showSave,
-	placeholder,
-	editShortcut,
-	enableDiscardShortcut,
-} = withDefaults(defineProps<{
-	modelValue: string,
+const props = withDefaults(defineProps<{
 	uploadCallback?: UploadCallback,
 	isEditEnabled?: boolean,
 	bottomActions?: BottomAction[],
@@ -214,6 +203,7 @@ const {
 	editShortcut?: string,
 	enableDiscardShortcut?: boolean,
 }>(), {
+	uploadCallback: undefined,
 	isEditEnabled: true,
 	bottomActions: () => [],
 	showSave: false,
@@ -222,7 +212,9 @@ const {
 	enableDiscardShortcut: false,
 })
 
-const emit = defineEmits(['update:modelValue', 'save'])
+const emit = defineEmits(['save'])
+
+const modelValue = defineModel<string>({ default: '' })
 
 const tiptapInstanceRef = ref<HTMLInputElement | null>(null)
 
@@ -287,7 +279,7 @@ const CustomImage = Image.extend({
 
 			nextTick(async () => {
 
-				const img = document.getElementById(id)
+				const img = document.getElementById(id) as HTMLImageElement | null
 
 				if (!img) return
 
@@ -318,13 +310,13 @@ const CustomImage = Image.extend({
 type Mode = 'edit' | 'preview'
 
 const internalMode = ref<Mode>('preview')
-const isEditing = computed(() => internalMode.value === 'edit' && isEditEnabled)
+const isEditing = computed(() => internalMode.value === 'edit' && props.isEditEnabled)
 const contentHasChanged = ref<boolean>(false)
 
 let lastSavedState = ''
 
 watch(
-	() => modelValue,
+	modelValue,
 	(newValue) => {
 		if (!contentHasChanged.value) {
 			lastSavedState = newValue
@@ -334,7 +326,7 @@ watch(
 )
 
 watch(
-	() => internalMode.value,
+	internalMode,
 	mode => {
 		if (mode === 'preview') {
 			contentHasChanged.value = false
@@ -385,25 +377,19 @@ const extensions : Extensions = [
 	Text,
 
 	Placeholder.configure({
-		placeholder: ({editor}) => {
-			if (!isEditing.value) {
+		placeholder({editor}) {
+			if (!isEditing.value || editor.getText() !== '' && !editor.isFocused) {
 				return ''
 			}
 
-			if (editor.getText() !== '' && !editor.isFocused) {
-				return ''
-			}
-
-			return placeholder !== ''
-				? placeholder
-				: t('input.editor.placeholder')
+			return props.placeholder || t('input.editor.placeholder')
 		},
 	}),
 	Typography,
 	Underline,
 	Link.configure({
 		openOnClick: false,
-		validate: (href: string) => (new RegExp(
+		validate: (href) => (new RegExp(
 			`^(https?|${additionalLinkProtocols.join('|')}):\\/\\/`,
 			'i',
 		)).test(href),
@@ -422,8 +408,8 @@ const extensions : Extensions = [
 	TaskList,
 	TaskItem.configure({
 		nested: true,
-		onReadOnlyChecked: (node: Node, checked: boolean): boolean => {
-			if (!isEditEnabled) {
+		onReadOnlyChecked(node, checked) {
+			if (!props.isEditEnabled) {
 				return false
 			}
 
@@ -455,7 +441,7 @@ const extensions : Extensions = [
 ]
 
 // Add a custom extension for the Escape key
-if (enableDiscardShortcut) {
+if (props.enableDiscardShortcut) {
 	extensions.push(Extension.create({
 		name: 'escapeKey',
 
@@ -474,21 +460,13 @@ const editor = useEditor({
 	// eslint-disable-next-line vue/no-ref-object-reactivity-loss
 	editable: isEditing.value,
 	extensions: extensions,
-	onUpdate: () => {
-		bubbleNow()
-	},
+	onUpdate: bubbleNow,
 })
 
-watch(
-	() => isEditing.value,
-	() => {
-		editor.value?.setEditable(isEditing.value)
-	},
-	{immediate: true},
-)
+watchEffect(() => editor.value?.setEditable(isEditing.value))
 
 watch(
-	() => modelValue,
+	modelValue,
 	value => {
 		if (!editor?.value) return
 
@@ -502,13 +480,14 @@ watch(
 )
 
 function bubbleNow() {
-	if (editor.value?.getHTML() === modelValue ||
-		(editor.value?.getHTML() === '<p></p>') && modelValue === '') {
+	const editorVal = editor.value!.getHTML()
+	if (editorVal === modelValue.value ||
+		(editorVal === '<p></p>') && modelValue.value === '') {
 		return
 	}
 
 	contentHasChanged.value = true
-	emit('update:modelValue', editor.value?.getHTML())
+	modelValue.value = editorVal
 }
 
 function bubbleSave() {
@@ -528,7 +507,7 @@ function exitEditMode() {
 }
 
 function setEditIfApplicable() {
-	if (!isEditEnabled) return
+	if (!props.isEditEnabled) return
 	if (isEditing.value) return
 
 	setEdit()
@@ -545,21 +524,20 @@ onBeforeUnmount(() => editor.value?.destroy())
 
 const uploadInputRef = ref<HTMLInputElement | null>(null)
 
-function uploadAndInsertFiles(files: File[] | FileList) {
-	uploadCallback(files).then(urls => {
-		urls?.forEach(url => {
-			editor.value
-				?.chain()
-				.focus()
-				.setImage({src: url})
-				.run()
-		})
-		bubbleSave()
+async function uploadAndInsertFiles(files: File[] | FileList) {
+	const urls = await props.uploadCallback?.(files)
+	urls?.forEach(url => {
+		editor.value
+			?.chain()
+			.focus()
+			.setImage({src: url})
+			.run()
 	})
+	bubbleSave()
 }
 
 function triggerImageInput(event) {
-	if (typeof uploadCallback !== 'undefined') {
+	if (typeof props.uploadCallback !== 'undefined') {
 		uploadInputRef.value?.click()
 		return
 	}
@@ -569,7 +547,7 @@ function triggerImageInput(event) {
 
 async function addImage(event) {
 
-	if (typeof uploadCallback !== 'undefined') {
+	if (typeof props.uploadCallback !== 'undefined') {
 		const files = uploadInputRef.value?.files
 
 		if (!files || files.length === 0) {
@@ -594,28 +572,28 @@ function setLink(event) {
 }
 
 onMounted(async () => {
-	if (editShortcut !== '') {
+	if (props.editShortcut !== '') {
 		document.addEventListener('keydown', setFocusToEditor)
 	}
 
 	await nextTick()
 
-	if (typeof uploadCallback !== 'undefined') {
+	if (typeof props.uploadCallback !== 'undefined') {
 		const input = tiptapInstanceRef.value?.querySelectorAll('.tiptap__editor')[0]?.children[0]
 		input?.addEventListener('paste', handleImagePaste)
 	}
 
-	setModeAndValue(modelValue)
+	setModeAndValue(modelValue.value)
 })
 
 onBeforeUnmount(() => {
 	nextTick(() => {
-		if (typeof uploadCallback !== 'undefined') {
+		if (typeof props.uploadCallback !== 'undefined') {
 			const input = tiptapInstanceRef.value?.querySelectorAll('.tiptap__editor')[0]?.children[0]
 			input?.removeEventListener('paste', handleImagePaste)
 		}
 	})
-	if (editShortcut !== '') {
+	if (props.editShortcut !== '') {
 		document.removeEventListener('keydown', setFocusToEditor)
 	}
 })
@@ -646,7 +624,7 @@ function setFocusToEditor(event) {
 
 	const hotkeyString = eventToHotkeyString(event)
 	if (!hotkeyString) return
-	if (hotkeyString !== editShortcut ||
+	if (hotkeyString !== props.editShortcut ||
 		event.target.tagName.toLowerCase() === 'input' ||
 		event.target.tagName.toLowerCase() === 'textarea' ||
 		event.target.contentEditable === 'true') {
@@ -655,7 +633,7 @@ function setFocusToEditor(event) {
 
 	event.preventDefault()
 
-	if (!isEditing.value && isEditEnabled) {
+	if (!isEditing.value && props.isEditEnabled) {
 		internalMode.value = 'edit'
 	}
 
@@ -679,7 +657,7 @@ function clickTasklistCheckbox(event) {
 }
 
 watch(
-	() => isEditing.value,
+	isEditing,
 	async editing => {
 		await nextTick()
 
